@@ -4,6 +4,14 @@ import remarkGfm from 'remark-gfm';
 import { MermaidChart } from './MermaidChart';
 import { CodeBlock } from './CodeBlock';
 
+/** Backend may append `\n[Sent at: <iso>]` — strip from body so it is not shown in the chat. */
+const SENT_AT_SUFFIX_REGEX = /\n\[{1,2}Sent at: [^\]]+\]{1,2}$/;
+
+function stripSentAtSuffix(str) {
+  if (typeof str !== 'string') return str;
+  return str.replace(SENT_AT_SUFFIX_REGEX, '');
+}
+
 /**
  * Extract plain text from message content (string or blocks with type "text").
  * @param {string|Array} content
@@ -94,9 +102,16 @@ function normalizeThinkingBody(body) {
   return body.replace(/(\d+)\.\s*\n/g, '$1. ');
 }
 
-/** ReactMarkdown components: render fenced code blocks with CodeBlock (wrap/expand), mermaid as diagrams. */
+/** ReactMarkdown components: render fenced code blocks with CodeBlock (wrap/expand), mermaid as diagrams, tables in a scroll wrapper. */
 function createMarkdownComponents() {
   return {
+    table({ node, children, ...props }) {
+      return (
+        <div className="markdown-table-wrap" role="region" aria-label="Table">
+          <table {...props}>{children}</table>
+        </div>
+      );
+    },
     code({ node, inline, className, children, ...props }) {
       const match = /language-(\w+)/.exec(className || '');
       const lang = match ? match[1] : '';
@@ -158,6 +173,8 @@ function createMarkdownComponents() {
 const markdownComponents = createMarkdownComponents();
 
 const TOOL_DETAILS_REGEX = /<details[^>]*>[\s\S]*?<summary>[^<]*Tool Use:[^<]*<\/summary>[\s\S]*?<\/details>/gi;
+/** Matches any <details> block; captures summary (1) and body (2). Used to split so both Thinking and Tool Use render as collapsibles. */
+const ANY_DETAILS_BLOCK_REGEX = /<details[^>]*>\s*<summary[^>]*>([\s\S]*?)<\/summary>\s*([\s\S]*?)<\/details>/gi;
 const TOOL_DETAIL_BLOCK_REGEX = /<details[^>]*>\s*<summary[^>]*>([\s\S]*?)<\/summary>\s*([\s\S]*?)<\/details>/i;
 
 /**
@@ -176,21 +193,25 @@ function parseToolDetailBlock(content) {
 }
 
 /**
- * Split main text into segments; tool-detail segments get message-tool-details class (IBM Plex Mono).
+ * Split main text into segments: text, thinking blocks, and tool-use blocks.
+ * So every <details> (Thinking or Tool Use) renders as a proper collapsible, not raw HTML.
  * @param {string} text
- * @returns {Array<{ type: 'text' | 'tool', content: string }>}
+ * @returns {Array<{ type: 'text' | 'thinking' | 'tool', content?: string, summary?: string, body?: string }>}
  */
 function splitToolDetails(text) {
   if (!text || typeof text !== 'string') return [];
   const parts = [];
   let lastIndex = 0;
-  const re = new RegExp(TOOL_DETAILS_REGEX.source, 'gi');
+  const re = new RegExp(ANY_DETAILS_BLOCK_REGEX.source, 'gi');
   let m;
   while ((m = re.exec(text)) !== null) {
     if (m.index > lastIndex) {
       parts.push({ type: 'text', content: text.slice(lastIndex, m.index) });
     }
-    parts.push({ type: 'tool', content: m[0] });
+    const summary = (m[1] || '').replace(/\s+/g, ' ').trim();
+    const body = (m[2] || '').trim();
+    const isThinking = summary.toLowerCase() === 'thinking';
+    parts.push(isThinking ? { type: 'thinking', summary: summary || 'Thinking', body } : { type: 'tool', content: m[0], summary, body });
     lastIndex = m.index + m[0].length;
   }
   if (lastIndex < text.length) {
@@ -335,7 +356,8 @@ export function MessageList({ messages, isStreaming, onCopyMessage, onRegenerate
         const isLast = i === messages.length - 1;
         const showCursor = isAssistant && isLast && isStreaming && !isError;
         const parsed = isAssistant && !isError ? parseAssistantContent(msg.content) : null;
-        const text = isError ? getMessageText(msg.content) : (isAssistant ? (parsed.main) : getMessageText(msg.content));
+        let text = isError ? getMessageText(msg.content) : (isAssistant ? (parsed.main) : getMessageText(msg.content));
+        text = stripSentAtSuffix(text);
         const thinking = isAssistant && !isError ? parsed?.thinking : null;
         const thinkingStreaming = isAssistant && !isError ? parsed?.thinkingStreaming : null;
         const toolStreaming = isAssistant && !isError ? parsed?.toolStreaming : null;
@@ -401,34 +423,56 @@ export function MessageList({ messages, isStreaming, onCopyMessage, onRegenerate
                   </details>
                 )}
                 {!isError && toolStreaming != null && (
-                  <details className="message-tool-details message-tool-details--collapsible message-tool-details--streaming" open>
-                    <summary className="message-tool-details__summary">{toolStreaming.summary}</summary>
-                    <div className="message-tool-details__body">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                        {toolStreaming.body}
-                      </ReactMarkdown>
+                  <details className="message-thinking message-thinking--streaming" data-tool-use open>
+                    <summary className="message-thinking__summary">{toolStreaming.summary}</summary>
+                    <div className="message-thinking__body">
+                      <div className="message-thinking__md">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                          {toolStreaming.body}
+                        </ReactMarkdown>
+                      </div>
                     </div>
                   </details>
                 )}
                 {!isError && text && (
                   <div className="message__main">
                     {splitToolDetails(text).map((part, j) => {
-                      if (part.type !== 'tool') {
+                      if (part.type === 'text') {
                         return (
                           <div key={j} className="message__main-text">
-                            <ReactMarkdown components={markdownComponents}>{part.content}</ReactMarkdown>
+                            {isAssistant ? (
+                              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{part.content}</ReactMarkdown>
+                            ) : (
+                              <div className="message__main-text-plain">{part.content}</div>
+                            )}
                           </div>
                         );
                       }
-                      const parsedTool = parseToolDetailBlock(part.content);
+                      if (part.type === 'thinking') {
+                        return (
+                          <details key={j} className="message-thinking" data-thinking>
+                            <summary className="message-thinking__summary">{part.summary}</summary>
+                            <div className="message-thinking__body">
+                              <div className="message-thinking__md">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                                  {normalizeThinkingBody(part.body)}
+                                </ReactMarkdown>
+                              </div>
+                            </div>
+                          </details>
+                        );
+                      }
+                      const parsedTool = part.summary != null ? { summary: part.summary, body: part.body } : parseToolDetailBlock(part.content);
                       if (parsedTool) {
                         const isToolUse = /Tool Use:\s*\S+/.test(parsedTool.summary);
                         return (
-                          <details key={j} className="message-tool-details message-tool-details--collapsible">
-                            <summary className="message-tool-details__summary">{parsedTool.summary}</summary>
-                            <div className="message-tool-details__body">
+                          <details key={j} className="message-thinking" data-tool-use>
+                            <summary className="message-thinking__summary">{parsedTool.summary}</summary>
+                            <div className="message-thinking__body">
                               {isToolUse ? (
-                                <ReactMarkdown components={markdownComponents}>{parsedTool.body}</ReactMarkdown>
+                                <div className="message-thinking__md">
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{parsedTool.body}</ReactMarkdown>
+                                </div>
                               ) : (
                                 <CodeBlock raw={parsedTool.body} />
                               )}
@@ -437,7 +481,7 @@ export function MessageList({ messages, isStreaming, onCopyMessage, onRegenerate
                         );
                       }
                       return (
-                        <span key={j} className="message-tool-details">{part.content}</span>
+                        <span key={j} className="message-thinking">{part.content}</span>
                       );
                     })}
                   </div>

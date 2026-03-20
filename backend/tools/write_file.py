@@ -2,15 +2,19 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+from backend.core.file_access import (
+    atomic_write_bytes,
+    atomic_write_text,
+    backup_if_exists,
+    is_write_allowed,
+    resolve_path,
+)
 
-# Workspace root: project root (parent of backend/)
-_BACKEND_DIR = Path(__file__).resolve().parent.parent
-WORKSPACE_ROOT = _BACKEND_DIR.parent
+logger = logging.getLogger(__name__)
 
 TOOL_DEF = {
     "name": "write_file",
-    "description": "Write content to a file. Use relative paths from the project root (e.g. backend/tools/read_file.py). Overwrites by default; set append to true to add at the end. Parent directories are created if missing. Read the file first when editing so you don't overwrite blindly.",
+    "description": "Write content to a file. Use relative paths from the project root (e.g. backend/tools/read_file.py). Paths are canonicalized and must stay inside the project. Overwrites are done atomically (tmp then replace). Overwrites by default; set append to true to add at the end. Parent directories are created if missing. Read the file first when editing so you don't overwrite blindly. Writes to .git/ and node_modules/ are blocked.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -30,6 +34,10 @@ TOOL_DEF = {
                 "type": "boolean",
                 "description": "If true, append to the file instead of overwriting (default: false)",
             },
+            "backup": {
+                "type": "boolean",
+                "description": "If true and overwriting an existing file, create a .bak copy first (default: false)",
+            },
             "encoding": {
                 "type": "string",
                 "description": "Text encoding for text mode (default: utf-8)",
@@ -41,28 +49,15 @@ TOOL_DEF = {
 }
 
 
-def _resolve_path(file_path: str) -> Optional[Path]:
-    """Resolve file_path to an absolute path under WORKSPACE_ROOT. Return None if outside."""
-    path = Path(file_path)
-    if not path.is_absolute():
-        path = (WORKSPACE_ROOT / path).resolve()
-    else:
-        path = path.resolve()
-    try:
-        path.resolve().relative_to(WORKSPACE_ROOT)
-    except ValueError:
-        return None
-    return path
-
-
 def call_tool(tool_input: dict, context=None):
     file_path = tool_input.get("file_path", "").strip()
     content = tool_input.get("content", "")
     mode = (tool_input.get("mode") or "text").lower()
     append = tool_input.get("append", False)
+    backup = tool_input.get("backup", False)
     encoding = tool_input.get("encoding") or "utf-8"
 
-    resolved = _resolve_path(file_path)
+    resolved = resolve_path(file_path)
     if resolved is None:
         logger.warning("Rejected path outside workspace: %s", file_path)
         return 200, {
@@ -70,6 +65,11 @@ def call_tool(tool_input: dict, context=None):
             "error": "Path is outside the project workspace.",
             "path": file_path,
         }
+
+    allowed, err = is_write_allowed(resolved)
+    if not allowed:
+        logger.warning("Write blocked for %s: %s", file_path, err)
+        return 200, {"success": False, "error": err, "path": str(resolved)}
 
     path_str = str(resolved)
     if resolved.exists() and resolved.is_dir():
@@ -79,14 +79,22 @@ def call_tool(tool_input: dict, context=None):
         resolved.parent.mkdir(parents=True, exist_ok=True)
 
         if mode == "text":
-            with open(resolved, "a" if append else "w", encoding=encoding) as f:
-                f.write(content)
+            if append:
+                with open(resolved, "a", encoding=encoding) as f:
+                    f.write(content)
+            else:
+                if backup and resolved.exists():
+                    backup_if_exists(resolved)
+                atomic_write_text(resolved, content, encoding=encoding)
         elif mode == "binary":
+            data = bytes.fromhex(content)
             if append:
                 with open(resolved, "ab") as f:
-                    f.write(bytes.fromhex(content))
+                    f.write(data)
             else:
-                resolved.write_bytes(bytes.fromhex(content))
+                if backup and resolved.exists():
+                    backup_if_exists(resolved)
+                atomic_write_bytes(resolved, data)
         else:
             return 200, {
                 "success": False,

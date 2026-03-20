@@ -1,10 +1,9 @@
 """
 Set the app's theme. Used by Akira to change the UI look based on user mood or preference.
+Theme is applied and persisted in the browser (localStorage); this tool only returns the
+theme name so the frontend can apply it via the chat stream.
 """
-import json
 import logging
-
-from backend.core.paths import THEME_CONFIG_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +52,5 @@ def call_tool(tool_input: dict, context=None):
             "error": f"Theme must be one of: {', '.join(VALID_THEMES)}.",
             "theme": None,
         }
-    try:
-        with open(THEME_CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump({"theme": theme}, f, indent=2)
-        logger.info("Theme set to %s", theme)
-        return 200, {"success": True, "theme": theme, "message": f"Theme set to {theme}. The app will update to match."}
-    except (OSError, IOError) as e:
-        logger.error("Failed to write theme config: %s", e)
-        return 500, {"success": False, "error": str(e), "theme": None}
+    logger.info("Theme set to %s (persisted in browser)", theme)
+    return 200, {"success": True, "theme": theme, "message": f"Theme set to {theme}. The app will update to match."}

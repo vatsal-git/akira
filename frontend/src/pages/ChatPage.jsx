@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { MessageList, getMessageText } from '../components/MessageList';
 import ChatInput from '../components/ChatInput';
+import { CameraPreview } from '../components/CameraPreview';
 import { Sidebar } from '../components/Sidebar';
 import { SettingsModal } from '../components/SettingsModal';
 import { sendMessage } from '../api/chat';
@@ -9,6 +10,7 @@ import { listChats, getChat } from '../api/history';
 import { getSettings } from '../api/settings';
 import { applyTheme, getStoredTheme } from '../config/theme';
 import { playCompletionSound } from '../utils/sound';
+import { useBrowserVoice, startListening, stopListening, speak, stopSpeaking } from '../utils/voice';
 
 const SETTINGS_STORAGE_KEY = 'akira_settings';
 
@@ -24,6 +26,7 @@ function loadStoredSettings() {
       thinking_budget: data.thinking_budget,
       enabled_tools: data.enabled_tools,
       stream: data.stream,
+      autonomous_mode: data.autonomous_mode,
     };
   } catch {
     return null;
@@ -39,6 +42,7 @@ function saveStoredSettings(settings) {
       thinking_budget: settings.thinking_budget,
       enabled_tools: settings.enabled_tools,
       stream: settings.stream,
+      autonomous_mode: settings.autonomous_mode,
     };
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(toStore));
   } catch (_) {}
@@ -54,6 +58,7 @@ const DEFAULT_SETTINGS = {
   current_model: 'anthropic',
   available_providers: ['anthropic'],
   stream: true, // When true, response streams in; when false, buffered and shown at once
+  autonomous_mode: false,
 };
 
 export default function ChatPage() {
@@ -75,11 +80,44 @@ export default function ChatPage() {
   const autoScrollRef = useRef(true);
   const scrollRafRef = useRef(null);
   const createdChatIdRef = useRef(null); // Chat we just created via stream meta; skip loadChat to avoid overwriting messages
+  const messagesRef = useRef([]);
+  const autonomousModeRef = useRef(false);
+  const pendingUserMessageRef = useRef(null);
+  const performSendRef = useRef(null);
+  const abortedRef = useRef(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const [showCopyFeedback, setShowCopyFeedback] = useState(false);
+  // Bump when theme is applied from stream so Sidebar/UI re-renders and shows new theme
+  const [themeVersion, setThemeVersion] = useState(0);
+  // Voice conversation: speak to Akira, hear reply
+  const voiceSupport = useBrowserVoice();
+  const [voiceMode, setVoiceMode] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [interimTranscript, setInterimTranscript] = useState('');
+  const currentAssistantContentRef = useRef('');
+  const voiceListenControlRef = useRef(null);
+  const lastSendWasVoiceRef = useRef(false);
+  const cameraCaptureRef = useRef(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  useEffect(() => {
+    messagesRef.current = messages;
+    autonomousModeRef.current = settings.autonomous_mode;
+  }, [messages, settings.autonomous_mode]);
+
+  const voiceModeRef = useRef(voiceMode);
+  useEffect(() => {
+    voiceModeRef.current = voiceMode;
+  }, [voiceMode]);
+
+  const scrollToBottom = (smooth = true) => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const targetScrollTop = el.scrollHeight - el.clientHeight;
+    if (smooth) {
+      el.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
+    } else {
+      el.scrollTop = targetScrollTop;
+    }
   };
 
   const updateCanScrollDown = () => {
@@ -111,17 +149,19 @@ export default function ChatPage() {
     };
   }, [messages]);
 
-  useEffect(() => {
+  // Scroll to bottom after DOM updates so long/streaming messages stay in view
+  useLayoutEffect(() => {
     if (!autoScrollRef.current) return;
     if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
     scrollRafRef.current = requestAnimationFrame(() => {
       scrollRafRef.current = null;
-      scrollToBottom();
+      // Use instant scroll during streaming so each delta keeps view at bottom; smooth for final jump
+      scrollToBottom(/* smooth */ !streaming);
     });
     return () => {
       if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
     };
-  }, [messages]);
+  }, [messages, streaming]);
 
   useEffect(() => {
     if (wasStreamingRef.current && !streaming) {
@@ -211,6 +251,7 @@ export default function ChatPage() {
   };
 
   const handleStop = () => {
+    abortedRef.current = true;
     abortControllerRef.current?.abort();
   };
 
@@ -277,21 +318,21 @@ export default function ChatPage() {
           setSettings((prev) => ({ ...prev, ...data }));
         },
         onTheme: (data) => {
-          if (data.theme) applyTheme(data.theme, true);
+          const name = typeof data?.theme === 'string' ? data.theme.trim().toLowerCase() : '';
+          if (name && applyTheme(name, true)) setThemeVersion((v) => v + 1);
         },
         onDone: (data) => {
           setSending(false);
           setStreaming(false);
-          if (data?.model) {
-            setMessages((prev) => {
-              const next = [...prev];
-              const slot = next[assistantIndex];
-              if (slot && slot.role === 'assistant') {
-                next[assistantIndex] = { ...slot, model: data.model };
-              }
-              return next;
-            });
-          }
+          const sentAt = new Date().toISOString();
+          setMessages((prev) => {
+            const next = [...prev];
+            const slot = next[assistantIndex];
+            if (slot && slot.role === 'assistant') {
+              next[assistantIndex] = { ...slot, timestamp: sentAt, ...(data?.model && { model: data.model }) };
+            }
+            return next;
+          });
           playCompletionSound();
         },
         onError: (data) => {
@@ -302,9 +343,9 @@ export default function ChatPage() {
             const next = [...prev];
             const slot = next[assistantIndex];
             if (slot && slot.role === 'assistant') {
-              next[assistantIndex] = { ...slot, content: errorText, error: true };
+              next[assistantIndex] = { ...slot, content: errorText, error: true, timestamp: new Date().toISOString() };
             } else {
-              next.push({ role: 'assistant', content: errorText, error: true });
+              next.push({ role: 'assistant', content: errorText, error: true, timestamp: new Date().toISOString() });
             }
             return next;
           });
@@ -313,7 +354,19 @@ export default function ChatPage() {
     );
   };
 
-  const handleSend = (text, options = {}) => {
+  const scheduleAutonomousNext = () => {
+    setTimeout(() => {
+      const pending = pendingUserMessageRef.current;
+      pendingUserMessageRef.current = null;
+      if (pending) {
+        performSendRef.current?.(pending.text, pending.options);
+      } else if (autonomousModeRef.current) {
+        performSendRef.current?.('Continue.', {});
+      }
+    }, 0);
+  };
+
+  const performSend = (text, options = {}) => {
     setSending(true);
     setStreaming(true);
     autoScrollRef.current = true;
@@ -321,14 +374,15 @@ export default function ChatPage() {
     const userMessage = {
       role: 'user',
       content: text,
+      timestamp: new Date().toISOString(),
       ...(options.images?.length && { images: options.images }),
       ...(options.files?.length && { files: options.files }),
     };
-    const assistantPlaceholder = { role: 'assistant', content: '' };
+    const assistantPlaceholder = { role: 'assistant', content: '', timestamp: null };
     setMessages((prev) => [...prev, userMessage, assistantPlaceholder]);
 
-    // Bind this stream to the new assistant slot so overlapping requests don't mix responses
-    const assistantIndex = messages.length + 1;
+    const assistantIndex = messagesRef.current.length + 1;
+    currentAssistantContentRef.current = '';
 
     abortControllerRef.current = new AbortController();
     sendMessage(
@@ -355,6 +409,7 @@ export default function ChatPage() {
           if (data.chat_id) navigate(`/chat/${data.chat_id}`);
         },
         onDelta: (delta) => {
+          currentAssistantContentRef.current += delta ?? '';
           setMessages((prev) => {
             const next = [...prev];
             const slot = next[assistantIndex];
@@ -371,22 +426,52 @@ export default function ChatPage() {
           setSettings((prev) => ({ ...prev, ...data }));
         },
         onTheme: (data) => {
-          if (data.theme) applyTheme(data.theme, true);
+          const name = typeof data?.theme === 'string' ? data.theme.trim().toLowerCase() : '';
+          if (name && applyTheme(name, true)) setThemeVersion((v) => v + 1);
         },
         onDone: (data) => {
           setSending(false);
           setStreaming(false);
-          if (data?.model) {
-            setMessages((prev) => {
-              const next = [...prev];
-              const slot = next[assistantIndex];
-              if (slot && slot.role === 'assistant') {
-                next[assistantIndex] = { ...slot, model: data.model };
-              }
-              return next;
-            });
+          const sentAt = new Date().toISOString();
+          setMessages((prev) => {
+            const next = [...prev];
+            const slot = next[assistantIndex];
+            if (slot && slot.role === 'assistant') {
+              next[assistantIndex] = { ...slot, timestamp: sentAt, ...(data?.model && { model: data.model }) };
+            }
+            return next;
+          });
+          if (!abortedRef.current) {
+            playCompletionSound();
+            scheduleAutonomousNext();
+          } else {
+            abortedRef.current = false;
           }
-          playCompletionSound();
+          // Voice mode: speak Akira's reply then start listening again (only if this reply was triggered by voice)
+          if (voiceModeRef.current && lastSendWasVoiceRef.current && currentAssistantContentRef.current) {
+            lastSendWasVoiceRef.current = false;
+            const raw = currentAssistantContentRef.current;
+            const speakable = raw.replace(/<details[\s\S]*?<\/details>/gi, '').trim();
+            if (speakable) {
+              speak(speakable).then(() => {
+                if (voiceModeRef.current) {
+                  voiceListenControlRef.current = startListening({
+                    onResult: (text) => {
+                      if (!text.trim()) return;
+                      voiceListenControlRef.current?.stop();
+                      setListening(false);
+                      setInterimTranscript('');
+                      lastSendWasVoiceRef.current = true;
+                      performSend(text);
+                    },
+                    onInterim: setInterimTranscript,
+                    onError: () => setListening(false),
+                  });
+                  setListening(true);
+                }
+              }).catch(() => {});
+            }
+          }
         },
         onError: (data) => {
           setSending(false);
@@ -396,19 +481,80 @@ export default function ChatPage() {
             const next = [...prev];
             const slot = next[assistantIndex];
             if (slot && slot.role === 'assistant') {
-              next[assistantIndex] = { ...slot, content: errorText, error: true };
+              next[assistantIndex] = { ...slot, content: errorText, error: true, timestamp: new Date().toISOString() };
             } else {
-              next.push({ role: 'assistant', content: errorText, error: true });
+              next.push({ role: 'assistant', content: errorText, error: true, timestamp: new Date().toISOString() });
             }
             return next;
           });
+          if (!abortedRef.current) scheduleAutonomousNext();
+          abortedRef.current = false;
         },
       }
     );
   };
+  performSendRef.current = performSend;
+
+  const MAX_IMAGES = 5;
+
+  const getCameraImageIfNeeded = async () => {
+    if (!voiceModeRef.current || !cameraCaptureRef.current?.captureFrame) return null;
+    try {
+      const frame = await cameraCaptureRef.current.captureFrame();
+      return frame ? [frame] : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const handleSend = async (text, options = {}) => {
+    if (autonomousModeRef.current && streaming) {
+      pendingUserMessageRef.current = { text, options };
+      return;
+    }
+    const cameraImages = await getCameraImageIfNeeded();
+    const allImages = [...(cameraImages || []), ...(options?.images || [])].slice(0, MAX_IMAGES);
+    performSend(text, { ...options, images: allImages.length ? allImages : undefined });
+  };
+
+  const handleVoiceToggle = () => {
+    if (!voiceSupport.supported) {
+      alert('Voice conversation is not available in this browser. Use the Akira desktop app and ensure the frontend has been rebuilt (npm run build in the frontend folder).');
+      return;
+    }
+    const next = !voiceMode;
+    setVoiceMode(next);
+    if (!next) {
+      voiceListenControlRef.current?.stop();
+      voiceListenControlRef.current = null;
+      stopListening();
+      stopSpeaking();
+      setListening(false);
+      setInterimTranscript('');
+      return;
+    }
+    setInterimTranscript('');
+    voiceListenControlRef.current = startListening({
+      onResult: (text) => {
+        if (!text.trim()) return;
+        voiceListenControlRef.current?.stop();
+        voiceListenControlRef.current = null;
+        setListening(false);
+        setInterimTranscript('');
+        lastSendWasVoiceRef.current = true;
+        getCameraImageIfNeeded().then((cameraImages) => {
+          performSend(text, { images: cameraImages?.length ? cameraImages : undefined });
+        });
+      },
+      onInterim: setInterimTranscript,
+      onError: () => setListening(false),
+    });
+    setListening(true);
+  };
 
   return (
     <div className="chat-page">
+      {voiceMode && <CameraPreview show={true} className="chat-page__camera-preview" cameraCaptureRef={cameraCaptureRef} />}
       <Sidebar
         chats={chats}
         currentChatId={chatId}
@@ -442,10 +588,11 @@ export default function ChatPage() {
           <div className="chat-page__empty" aria-hidden />
         ) : (
           <>
-            <div
-              ref={messagesContainerRef}
-              className="chat-page__messages"
-            >
+            <div className="chat-page__messages">
+              <div
+                ref={messagesContainerRef}
+                className="chat-page__messages-inner"
+              >
               <MessageList
                 messages={messages}
                 isStreaming={streaming}
@@ -461,12 +608,13 @@ export default function ChatPage() {
                   const msg = messages[i];
                   if (!msg) return;
                   const text = getMessageText(msg.content);
-                  setMessages((prev) => prev.slice(0, i + 1));
+                  setMessages((prev) => prev.slice(0, i));
                   chatInputRef.current?.setDraft?.(text);
                   setTimeout(() => chatInputRef.current?.focus(), 0);
                 }}
               />
               <div ref={messagesEndRef} aria-hidden />
+              </div>
             </div>
             <button
               type="button"
@@ -485,11 +633,16 @@ export default function ChatPage() {
           ref={chatInputRef}
           onSend={handleSend}
           onStop={handleStop}
-          disabled={sending}
+          disabled={sending && !settings.autonomous_mode}
           isStreaming={streaming}
           onCopyConversation={handleCopyConversation}
           canCopyConversation={messages.length > 0}
           copyFeedback={showCopyFeedback}
+          voiceSupported={voiceSupport.supported}
+          voiceMode={voiceMode}
+          listening={listening}
+          interimTranscript={interimTranscript}
+          onVoiceToggle={handleVoiceToggle}
         />
         </main>
       </div>

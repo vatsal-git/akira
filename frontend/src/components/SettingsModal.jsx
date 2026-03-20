@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { THEME_LABELS, THEME_EMOJI, getCurrentThemeName, applyTheme } from '../config/theme';
 
@@ -23,11 +23,28 @@ export function SettingsModal({ open, onClose, settings: initialSettings, onSett
     () => initialSettings?.enabled_tools ?? {}
   );
   const [stream, setStream] = useState(() => initialSettings?.stream ?? true);
+  const [autonomousMode, setAutonomousMode] = useState(
+    () => initialSettings?.autonomous_mode ?? false
+  );
   const [theme, setTheme] = useState(() => getCurrentThemeName() || 'neutral');
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const appearanceRef = useRef(null);
+  const [tooltipActive, setTooltipActive] = useState(null);
+  const [tooltipRect, setTooltipRect] = useState(null);
+  const tooltipAnchorRef = useRef(null);
 
   const tools = initialSettings?.tools ?? [];
+
+  useLayoutEffect(() => {
+    if (!tooltipActive || !tooltipAnchorRef.current) {
+      setTooltipRect(null);
+      return;
+    }
+    const el = tooltipAnchorRef.current;
+    const rect = el.getBoundingClientRect();
+    const centerY = rect.top + rect.height / 2;
+    setTooltipRect({ left: rect.right + 8, top: centerY });
+  }, [tooltipActive]);
 
   useEffect(() => {
     if (!open) return;
@@ -37,8 +54,10 @@ export function SettingsModal({ open, onClose, settings: initialSettings, onSett
     setThinkingBudget(initialSettings?.thinking_budget ?? 16000);
     setEnabledTools(initialSettings?.enabled_tools ?? {});
     setStream(initialSettings?.stream ?? true);
+    setAutonomousMode(initialSettings?.autonomous_mode ?? false);
     setTheme(getCurrentThemeName() || 'neutral');
     setAppearanceOpen(false);
+    setTooltipActive(null);
   }, [open, initialSettings]);
 
   useEffect(() => {
@@ -77,6 +96,7 @@ export function SettingsModal({ open, onClose, settings: initialSettings, onSett
       thinking_budget: Number(thinkingBudget),
       enabled_tools: { ...enabledTools },
       stream: Boolean(stream),
+      autonomous_mode: Boolean(autonomousMode),
     });
     applyTheme(theme, true);
     onClose();
@@ -204,6 +224,22 @@ export function SettingsModal({ open, onClose, settings: initialSettings, onSett
                 Show reply as it’s generated. Off = wait for full reply.
               </span>
             </div>
+            <div className="settings-modal__field settings-modal__field--row">
+              <input
+                id="settings-autonomous"
+                type="checkbox"
+                checked={autonomousMode}
+                onChange={(e) => setAutonomousMode(e.target.checked)}
+                className="settings-modal__checkbox"
+                aria-describedby="settings-autonomous-hint"
+              />
+              <label htmlFor="settings-autonomous" className="settings-modal__label settings-modal__label--inline">
+                Autonomous mode
+              </label>
+              <span id="settings-autonomous-hint" className="settings-modal__hint settings-modal__hint--inline">
+                After you send a message, the model keeps replying in a loop. You can send another message anytime; it will be used after the current reply finishes.
+              </span>
+            </div>
           </section>
 
           <section className="settings-modal__section" aria-labelledby="settings-tools-heading">
@@ -237,17 +273,21 @@ export function SettingsModal({ open, onClose, settings: initialSettings, onSett
                       {tool.description && (
                         <button
                           type="button"
+                          ref={(el) => {
+                          if (tooltipActive?.name === tool.name) tooltipAnchorRef.current = el;
+                        }}
                           className="settings-modal__tool-info-icon"
                           aria-label={`Details for ${tool.name}`}
-                          aria-describedby={`tooltip-${tool.name.replace(/\W+/g, '-')}`}
+                          aria-describedby={tooltipActive?.name === tool.name ? `settings-tooltip-${tool.name.replace(/\W+/g, '-')}` : undefined}
+                          onMouseEnter={() => { setTooltipActive({ name: tool.name, description: tool.description }); }}
+                          onMouseLeave={() => setTooltipActive(null)}
+                          onFocus={() => { setTooltipActive({ name: tool.name, description: tool.description }); }}
+                          onBlur={() => setTooltipActive(null)}
                         >
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                             <circle cx="12" cy="12" r="10" />
                             <path d="M12 16v-4M12 8h.01" />
                           </svg>
-                          <span id={`tooltip-${tool.name.replace(/\W+/g, '-')}`} className="settings-modal__tool-tooltip" role="tooltip">
-                            {tool.description}
-                          </span>
                         </button>
                       )}
                     </div>
@@ -341,5 +381,31 @@ export function SettingsModal({ open, onClose, settings: initialSettings, onSett
     document.body
   );
 
-  return modal;
+  const tooltipPortal =
+    tooltipActive && tooltipRect
+      ? createPortal(
+          <div
+            id={tooltipActive.name ? `settings-tooltip-${tooltipActive.name.replace(/\W+/g, '-')}` : undefined}
+            className="settings-modal__tool-tooltip settings-modal__tool-tooltip--portal"
+            role="tooltip"
+            style={{
+              position: 'fixed',
+              left: tooltipRect.left,
+              top: tooltipRect.top,
+              transform: 'translateY(-50%)',
+              zIndex: 1001,
+            }}
+          >
+            {tooltipActive.description}
+          </div>,
+          document.body
+        )
+      : null;
+
+  return (
+    <>
+      {modal}
+      {tooltipPortal}
+    </>
+  );
 }

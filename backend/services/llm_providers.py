@@ -123,8 +123,9 @@ class BaseLLMProvider(ABC):
         system_prompt: str = None,
         thinking_enabled: bool = False,
         thinking_budget: int = 1024,
+        model_override: str = None,
     ):
-        """Invoke the LLM with the given messages and parameters (sync)."""
+        """Invoke the LLM with the given messages and parameters (sync). model_override: optional model id (OpenRouter only)."""
         pass
 
     @abstractmethod
@@ -138,8 +139,9 @@ class BaseLLMProvider(ABC):
         thinking_enabled: bool = False,
         thinking_budget: int = 1024,
         stream_read_timeout: float = 120.0,
+        model_override: str = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """Invoke the LLM with the given messages and parameters (async stream)."""
+        """Invoke the LLM with the given messages and parameters (async stream). model_override: optional (OpenRouter only)."""
         pass
 
     def get_model_id(self) -> str:
@@ -177,8 +179,9 @@ class AnthropicProvider(BaseLLMProvider):
         system_prompt=None,
         thinking_enabled=False,
         thinking_budget=1024,
+        model_override=None,
     ):
-        """Stream responses from the Anthropic Claude model"""
+        """Stream responses from the Anthropic Claude model (model_override ignored)."""
         self.logger.info(
             f"Invoking Claude with {len(messages)} messages, {len(tools)} tools"
         )
@@ -239,8 +242,9 @@ class AnthropicProvider(BaseLLMProvider):
         thinking_enabled=False,
         thinking_budget=1024,
         stream_read_timeout=120.0,
+        model_override=None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """Stream responses from the Anthropic Claude model (async, non-blocking)."""
+        """Stream responses from the Anthropic Claude model (async, non-blocking). model_override ignored."""
         self.logger.info(
             f"Invoking Claude (async) with {len(messages)} messages, {len(tools)} tools"
         )
@@ -523,10 +527,12 @@ class OpenRouterProvider(BaseLLMProvider):
         system_prompt=None,
         thinking_enabled=False,
         thinking_budget=1024,
+        model_override=None,
     ):
         """Stream responses from OpenRouter; yield Anthropic-style chunks for llm_service.
         On 429/402 (openapi: TooManyRequestsResponse, PaymentRequiredResponse) switch to next ranked model and retry.
         On success, reset to top-ranked so next request tries the best model again.
+        When model_override is set (e.g. from AGI task routing), use that model for this request.
         """
         self.logger.info(
             "Invoking OpenRouter with %s messages, %s tools",
@@ -557,7 +563,7 @@ class OpenRouterProvider(BaseLLMProvider):
             )
 
         while True:
-            model = self._get_current_model()
+            model = (model_override and model_override.strip()) or self._get_current_model()
             payload = {
                 "model": model,
                 "messages": or_messages,
@@ -609,6 +615,9 @@ class OpenRouterProvider(BaseLLMProvider):
                     tool_calls_acc = {}  # index -> {id, name, arguments}
                     thinking_started = False
                     thinking_signature = None
+                    # Only emit main content after we've seen a chunk with content and no reasoning.
+                    # Avoids duplicate words when the API sends reasoning and content in separate chunks.
+                    allow_content_emission = True
                     # Force UTF-8 so emoji and other Unicode from the model decode correctly
                     r.encoding = "utf-8"
                     for line in r.iter_lines(decode_unicode=True):
@@ -637,7 +646,12 @@ class OpenRouterProvider(BaseLLMProvider):
                         # OpenRouter reasoning: delta.reasoning_details (array) or delta.reasoning (string)
                         reasoning_details = delta.get("reasoning_details") or []
                         reasoning_text = delta.get("reasoning")
-                        if reasoning_details or (reasoning_text is not None and reasoning_text != ""):
+                        has_reasoning = bool(
+                            reasoning_details or (reasoning_text is not None and reasoning_text != "")
+                        )
+                        if has_reasoning:
+                            # Once we see reasoning, suppress content until we see a content-only chunk
+                            allow_content_emission = False
                             if not thinking_started:
                                 # Use first reasoning_detail id as signature, or placeholder
                                 sig = "openrouter"
@@ -651,7 +665,9 @@ class OpenRouterProvider(BaseLLMProvider):
                                     "content_block": {"type": "thinking", "signature": thinking_signature},
                                 }
                                 thinking_started = True
-                            # Emit reasoning text from reasoning_details (reasoning.text items) or delta.reasoning
+                            # Emit reasoning text from reasoning_details (reasoning.text items) or delta.reasoning.
+                            # Prefer reasoning_details; only use delta.reasoning if no details (avoid duplicate text).
+                            emitted_reasoning_this_chunk = False
                             for detail in reasoning_details:
                                 if isinstance(detail, dict) and detail.get("type") == "reasoning.text":
                                     text = detail.get("text") or ""
@@ -660,14 +676,20 @@ class OpenRouterProvider(BaseLLMProvider):
                                             "type": "content_block_delta",
                                             "delta": {"type": "thinking_delta", "thinking": text},
                                         }
-                            if reasoning_text is not None and reasoning_text != "":
+                                        emitted_reasoning_this_chunk = True
+                            if not emitted_reasoning_this_chunk and reasoning_text is not None and reasoning_text != "":
                                 yield {
                                     "type": "content_block_delta",
                                     "delta": {"type": "thinking_delta", "thinking": reasoning_text},
                                 }
-                        # Text delta (content can be null in stream)
+                        else:
+                            # Chunk has no reasoning: we're in the answer phase, allow content from now on
+                            allow_content_emission = True
+                        # Text delta (content can be null in stream).
+                        # Emit content only when allowed: skip while in thinking phase to avoid duplicate words
+                        # (some models send the same text as reasoning then again as content in later chunks).
                         content = delta.get("content")
-                        if content is not None and content != "":
+                        if content is not None and content != "" and allow_content_emission:
                             yield {
                                 "type": "content_block_delta",
                                 "delta": {"type": "text_delta", "text": content},
@@ -754,6 +776,7 @@ class OpenRouterProvider(BaseLLMProvider):
         thinking_enabled=False,
         thinking_budget=1024,
         stream_read_timeout=120.0,
+        model_override=None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Stream OpenRouter (async via executor)."""
         queue = asyncio.Queue()
@@ -769,6 +792,7 @@ class OpenRouterProvider(BaseLLMProvider):
                     system_prompt=system_prompt,
                     thinking_enabled=thinking_enabled,
                     thinking_budget=thinking_budget,
+                    model_override=model_override,
                 ):
                     queue.put_nowait(("chunk", chunk))
             except Exception as e:

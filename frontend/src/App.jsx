@@ -1,19 +1,12 @@
 import { useEffect } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import ChatPage from './pages/ChatPage';
-import { applyStoredTheme, applyTheme, THEME_PRESETS } from './config/theme';
-import { getTheme } from './api/theme';
+import { applyStoredTheme } from './config/theme';
 import './App.css';
 
 function App() {
   useEffect(() => {
     applyStoredTheme();
-    getTheme()
-      .then(({ theme }) => {
-        const t = (theme && typeof theme === 'string') ? theme.trim() : '';
-        if (t && THEME_PRESETS[t]) applyTheme(t, true);
-      })
-      .catch(() => {});
   }, []);
 
   return (

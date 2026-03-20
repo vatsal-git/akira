@@ -2,18 +2,14 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from backend.core.file_access import resolve_path
+from backend.core.paths import MAX_TEXT_FILE_SIZE
+
 logger = logging.getLogger(__name__)
-
-# Workspace root: project root (parent of backend/)
-_BACKEND_DIR = Path(__file__).resolve().parent.parent
-WORKSPACE_ROOT = _BACKEND_DIR.parent
-
-# Text files larger than this (bytes) require start_line/end_line to avoid token overflow
-MAX_TEXT_FILE_SIZE = 512 * 1024  # 512 KB
 
 TOOL_DEF = {
     "name": "read_file",
-    "description": "Read content from a file. Use relative paths from the project root (e.g. backend/tools/read_file.py). For large text files, use start_line and end_line to read a range and avoid token limits. Text output can include line numbers to make edits easier.",
+    "description": "Read content from a file. Use relative paths from the project root (e.g. backend/tools/read_file.py). Paths are canonicalized and must stay inside the project. For large text files, use start_line and end_line to read a range and avoid token limits. Text output can include line numbers to make edits easier.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -44,20 +40,6 @@ TOOL_DEF = {
 }
 
 
-def _resolve_path(file_path: str) -> Optional[Path]:
-    """Resolve file_path to an absolute path under WORKSPACE_ROOT. Return None if outside."""
-    path = Path(file_path)
-    if not path.is_absolute():
-        path = (WORKSPACE_ROOT / path).resolve()
-    else:
-        path = path.resolve()
-    try:
-        path.resolve().relative_to(WORKSPACE_ROOT)
-    except ValueError:
-        return None
-    return path
-
-
 def call_tool(tool_input: dict, context=None):
     file_path = tool_input.get("file_path", "").strip()
     start_line = tool_input.get("start_line")
@@ -65,7 +47,7 @@ def call_tool(tool_input: dict, context=None):
     encoding = tool_input.get("encoding") or "utf-8"
     include_line_numbers = tool_input.get("include_line_numbers", True)
 
-    resolved = _resolve_path(file_path)
+    resolved = resolve_path(file_path)
     if resolved is None:
         logger.warning("Rejected path outside workspace: %s", file_path)
         return 200, {
@@ -125,7 +107,7 @@ def call_tool(tool_input: dict, context=None):
             if size > MAX_TEXT_FILE_SIZE:
                 return 200, {
                     "success": False,
-                    "error": f"File is large ({size} bytes). Use start_line and end_line to read a range (e.g. 1–100).",
+                    "error": f"File is large ({size} bytes, {total_lines} lines). Use start_line and end_line to read a range (e.g. 1–100).",
                     "path": path_str,
                     "size": size,
                     "total_lines": total_lines,

@@ -1,7 +1,11 @@
 import logging
-from typing import Any, Dict
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from typing import Any, Dict, Optional
 
 from backend.tools import discover_tools
+
+# Single shared executor for running tool handlers with timeout (bounded pool to avoid unbounded threads)
+_TOOL_EXECUTOR = ThreadPoolExecutor(max_workers=32, thread_name_prefix="tool_")
 
 
 class LLM_Tools:
@@ -17,7 +21,42 @@ class LLM_Tools:
         self.tools_def, self._tool_handlers = discover_tools()
         self.tools_name_list = [t["name"] for t in self.tools_def]
 
-    def call_tool(self, tool_name: str, tool_input: dict):
+    def _tool_timeout_seconds(
+        self,
+        tool_name: str,
+        request_timeout: Optional[float],
+        tool_input: Optional[dict] = None,
+    ) -> Optional[float]:
+        """Resolve effective timeout: request-level, per-tool TOOL_DEF timeout_seconds, then optional tool_input['timeout_seconds'] (LLM can pass per call)."""
+        if request_timeout is not None and request_timeout > 0:
+            timeout = request_timeout
+        else:
+            timeout = None
+        for t in self.tools_def:
+            if t.get("name") == tool_name and "timeout_seconds" in t:
+                tool_limit = t.get("timeout_seconds")
+                if isinstance(tool_limit, (int, float)) and tool_limit > 0:
+                    if timeout is None:
+                        timeout = float(tool_limit)
+                    else:
+                        timeout = min(timeout, float(tool_limit))
+                break
+        if tool_input:
+            inp_sec = tool_input.get("timeout_seconds")
+            if isinstance(inp_sec, (int, float)) and inp_sec > 0:
+                cap = float(inp_sec)
+                timeout = min(timeout, cap) if timeout is not None else cap
+        return timeout
+
+    def call_tool(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        timeout_seconds: Optional[float] = None,
+    ):
+        """Execute a tool with optional timeout. timeout_seconds can be set per-request; tools may also define timeout_seconds in TOOL_DEF. When None, uses request-scoped _request_tool_timeout_seconds if set."""
+        if timeout_seconds is None:
+            timeout_seconds = getattr(self, "_request_tool_timeout_seconds", None)
         self.logger.info("Calling tool: %s", tool_name)
         self.logger.debug("Tool input: %s", tool_input)
 
@@ -31,7 +70,21 @@ class LLM_Tools:
                 return 500, error_msg
 
             handler = self._tool_handlers[tool_name]
-            status, tool_result = handler(tool_input, self._context)
+            effective_timeout = self._tool_timeout_seconds(tool_name, timeout_seconds, tool_input)
+
+            if effective_timeout is not None and effective_timeout > 0:
+                future = _TOOL_EXECUTOR.submit(handler, tool_input, self._context)
+                try:
+                    status, tool_result = future.result(timeout=effective_timeout)
+                except FuturesTimeoutError:
+                    self.logger.warning("Tool %s timed out after %.1fs", tool_name, effective_timeout)
+                    return 408, {
+                        "error": f"Tool execution timed out after {effective_timeout:.0f} seconds.",
+                        "tool": tool_name,
+                        "timeout_seconds": effective_timeout,
+                    }
+            else:
+                status, tool_result = handler(tool_input, self._context)
 
             self.logger.info("Tool %s completed with status %s", tool_name, status)
             self.logger.debug("Tool result: %s", tool_result)

@@ -1,4 +1,3 @@
-import json
 import os
 import sys
 import dotenv
@@ -15,7 +14,6 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from backend.core.logger import setup_logging
-from backend.core.paths import THEME_CONFIG_FILE
 from backend.services.llm_service import LLM_Service
 from backend.api.routers import chat, history, task
 
@@ -32,7 +30,13 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://localhost:4173",
         "http://127.0.0.1:4173",
-        "null",  # Electron desktop (file:// or app load)
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:8001",
+        "http://127.0.0.1:8001",
+        "http://localhost:5731",
+        "http://127.0.0.1:5731",
+        "null",  # Electron / PyQt desktop (file:// or app load)
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -62,15 +66,17 @@ def get_default_settings(request: Request):
         for t in llm.tools_def
     ]
     max_tokens_default = int(os.getenv("MAX_TOKENS", 131072))
+    agi_mode = os.getenv("AGI_MODE", "").strip().lower() in ("1", "true", "yes")
     return {
         "max_tokens": max_tokens_default,
-        "temperature": float(os.getenv("DEFAULT_TEMPREATURE", "0.7")),
+        "temperature": float(os.getenv("DEFAULT_TEMPERATURE", "0.7")),
         "current_model": os.getenv("DEFAULT_MODEL", "openrouter"),
         "thinking_enabled": True,
         "thinking_budget": 16000,
         "stream": True,
         "tools": tools,
         "available_providers": ["openrouter", "anthropic"],
+        "agi_mode": agi_mode,
         "max_tokens_min": int(os.getenv("MAX_TOKENS_MIN", 1)),
         "max_tokens_max": int(os.getenv("MAX_TOKENS_MAX", 200000)),
         "temperature_min": float(os.getenv("TEMPERATURE_MIN", "0")),
@@ -78,25 +84,6 @@ def get_default_settings(request: Request):
         "thinking_budget_min": int(os.getenv("THINKING_BUDGET_MIN", 1024)),
         "thinking_budget_max": int(os.getenv("THINKING_BUDGET_MAX", 128000)),
     }
-
-
-def _load_theme_config():
-    """Return current theme from theme_config.json if it exists."""
-    if not os.path.isfile(THEME_CONFIG_FILE):
-        return None
-    try:
-        with open(THEME_CONFIG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return (data.get("theme") or "").strip() or None
-    except (OSError, IOError, ValueError):
-        return None
-
-
-@app.get("/api/theme")
-def get_theme():
-    """Return the current theme name (set by user or Akira). Frontend applies preset on load."""
-    theme = _load_theme_config()
-    return {"theme": theme or "default_light"}
 
 
 @app.get("/api/health")
@@ -107,7 +94,7 @@ def health():
 
 @app.get("/api/ready")
 def ready(request: Request):
-    """Readiness: returns 200 if Bedrock and history are usable, else 503."""
+    """Readiness: returns 200 if LLM provider and history file are usable, else 503."""
     try:
         llm = get_llm_service(request)
         path = getattr(llm, "history_file_path", None)
@@ -152,4 +139,5 @@ if os.path.isdir(FRONTEND_BUILD):
 if __name__ == "__main__":
     import uvicorn
     os.chdir(PROJECT_ROOT)
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.getenv("PORT", "8002"))
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=port, reload=True)

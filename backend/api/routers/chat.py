@@ -127,6 +127,7 @@ async def _chat_event_stream(
     enabled_tools_map: Optional[Dict[str, bool]],
     mood: Optional[str] = None,
     stream: bool = True,
+    tool_timeout_seconds: Optional[float] = None,
 ):
     """Async generator: yields SSE lines with meta, delta, done/error; handles disconnect and heartbeat.
     When stream=False, collects the full response then yields meta, one delta, done."""
@@ -146,6 +147,7 @@ async def _chat_event_stream(
             thinking_budget=thinking_budget,
             enabled_tools_map=enabled_tools_map,
             mood=mood,
+            tool_timeout_seconds=tool_timeout_seconds,
         )
         stream_anext = stream_gen.__anext__
 
@@ -288,6 +290,15 @@ async def chat_stream(body: ChatRequest, request: Request):
     thinking_budget = settings.get("thinking_budget", 16000)
     mood = settings.get("mood")  # Agent's current mood; injected into system prompt at send time
     stream = settings.get("stream", True)  # When False, buffer full response then send one delta
+    # Max seconds per tool execution; if exceeded, tool call returns 408. Omit or 0 = no timeout.
+    tool_timeout_seconds = settings.get("tool_timeout_seconds")
+    if tool_timeout_seconds is not None:
+        try:
+            tool_timeout_seconds = float(tool_timeout_seconds)
+            if tool_timeout_seconds <= 0:
+                tool_timeout_seconds = None
+        except (TypeError, ValueError):
+            tool_timeout_seconds = None
 
     message = body.message
 
@@ -342,6 +353,7 @@ async def chat_stream(body: ChatRequest, request: Request):
             enabled_tools_map=enabled_tools_map,
             mood=mood,
             stream=stream,
+            tool_timeout_seconds=tool_timeout_seconds,
         ),
         media_type="text/event-stream; charset=utf-8",
     )

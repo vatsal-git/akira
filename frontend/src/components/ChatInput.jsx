@@ -1,13 +1,31 @@
-import React, { useState, useRef, useImperativeHandle, forwardRef } from 'react';
+import React, { useState, useRef, useImperativeHandle, forwardRef, useLayoutEffect } from 'react';
 
-const LONG_MESSAGE_CHARS = 80;
+/** Max height (px) for the growing textarea — keep in sync with CSS max-height. */
+const TEXTAREA_MAX_HEIGHT = 240;
 const MAX_IMAGES = 5;
 const MAX_OTHER_FILES = 5;
 const IMAGE_TYPES = /^image\/(jpeg|png|gif|webp)$/i;
 
-export const ChatInput = forwardRef(function ChatInput({ onSend, onStop, disabled, isStreaming = false, placeholder = '', onTyping, onCopyConversation, canCopyConversation = false, copyFeedback = false }, ref) {
+export const ChatInput = forwardRef(function ChatInput(
+  {
+    onSend,
+    onStop,
+    disabled,
+    isStreaming = false,
+    placeholder = '',
+    onTyping,
+    onCopyConversation,
+    canCopyConversation = false,
+    copyFeedback = false,
+    voiceSupported = false,
+    voiceMode = false,
+    listening = false,
+    interimTranscript = '',
+    onVoiceToggle,
+  },
+  ref
+) {
   const [value, setValue] = useState('');
-  const [isExpanded, setIsExpanded] = useState(false);
   const [images, setImages] = useState([]); // { data, media_type, name }
   const [otherFiles, setOtherFiles] = useState([]); // { name, data, mime_type }
   const inputRef = useRef(null);
@@ -33,7 +51,6 @@ export const ChatInput = forwardRef(function ChatInput({ onSend, onStop, disable
     setValue('');
     setImages([]);
     setOtherFiles([]);
-    setIsExpanded(false);
   };
 
   const handleChange = (e) => {
@@ -49,7 +66,12 @@ export const ChatInput = forwardRef(function ChatInput({ onSend, onStop, disable
     }
   };
 
-  const showExpandButton = value.length >= LONG_MESSAGE_CHARS && !isExpanded;
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, TEXTAREA_MAX_HEIGHT)}px`;
+  }, [value]);
 
   const openFileSelector = () => {
     fileInputRef.current?.click();
@@ -143,6 +165,11 @@ export const ChatInput = forwardRef(function ChatInput({ onSend, onStop, disable
         aria-hidden
         onChange={handleFileChange}
       />
+      {listening && interimTranscript && (
+        <div className="chat-input__interim" aria-live="polite">
+          {interimTranscript}
+        </div>
+      )}
       {(images.length > 0 || otherFiles.length > 0) && (
         <div className="chat-input__attachments">
           {images.map((img, i) => (
@@ -175,7 +202,7 @@ export const ChatInput = forwardRef(function ChatInput({ onSend, onStop, disable
           ))}
         </div>
       )}
-      <div className={`chat-input__bar ${isExpanded ? 'chat-input__bar--expanded' : ''}`}>
+      <div className="chat-input__bar">
           <div className="chat-input__left">
             <button
               type="button"
@@ -188,6 +215,22 @@ export const ChatInput = forwardRef(function ChatInput({ onSend, onStop, disable
                 <line x1="5" y1="12" x2="19" y2="12" />
               </svg>
             </button>
+            {onVoiceToggle != null && (
+              <button
+                type="button"
+                className={`chat-input__icon chat-input__icon--voice ${voiceMode ? 'chat-input__icon--voice-active' : ''} ${listening ? 'chat-input__icon--listening' : ''}`}
+                aria-label={listening ? 'Listening…' : voiceMode ? 'Voice conversation on (click to off)' : 'Start voice conversation'}
+                title={listening ? 'Listening…' : voiceMode ? 'Voice on' : 'Talk with Akira (voice in & out)'}
+                onClick={onVoiceToggle}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="23" />
+                  <line x1="8" y1="23" x2="16" y2="23" />
+                </svg>
+              </button>
+            )}
             {onCopyConversation && (
               <button
                 type="button"
@@ -210,65 +253,18 @@ export const ChatInput = forwardRef(function ChatInput({ onSend, onStop, disable
               </button>
             )}
           </div>
-          {isExpanded ? (
-            <textarea
-              ref={inputRef}
-              className="chat-input__field chat-input__field--textarea"
-              value={value}
-              onChange={handleChange}
-              onKeyDown={handleKeyDown}
-              placeholder={placeholder}
-              disabled={disabled}
-              aria-label="Message"
-              autoComplete="off"
-              rows={4}
-            />
-          ) : (
-            <input
-              ref={inputRef}
-              type="text"
-              className="chat-input__field"
-              value={value}
-              onChange={handleChange}
-              onKeyDown={handleKeyDown}
-              placeholder={placeholder}
-              disabled={disabled}
-              aria-label="Message"
-              autoComplete="off"
-            />
-          )}
-          {showExpandButton && (
-            <button
-              type="button"
-              className="chat-input__expand"
-              onClick={() => setIsExpanded(true)}
-              aria-label="Expand to multi-line"
-              title="Expand to multi-line"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                <path d="M8 3H5a2 2 0 0 0-2 2v3" />
-                <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
-                <path d="M3 16v3a2 2 0 0 0 2 2h3" />
-                <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
-              </svg>
-            </button>
-          )}
-          {isExpanded && (
-            <button
-              type="button"
-              className="chat-input__expand"
-              onClick={() => setIsExpanded(false)}
-              aria-label="Collapse to single line"
-              title="Collapse to single line"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                <path d="M8 3v3a2 2 0 0 1-2 2H3" />
-                <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
-                <path d="M3 16h3a2 2 0 0 1 2 2v3" />
-                <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
-              </svg>
-            </button>
-          )}
+          <textarea
+            ref={inputRef}
+            className="chat-input__field chat-input__field--textarea"
+            value={value}
+            onChange={handleChange}
+            onKeyDown={handleKeyDown}
+            placeholder={placeholder}
+            disabled={disabled}
+            aria-label="Message"
+            autoComplete="off"
+            rows={1}
+          />
           <button
             type="button"
             onClick={handleSubmit}

@@ -8,6 +8,7 @@ from .llm_providers import BaseLLMProvider, AnthropicProvider, OpenRouterProvide
 from .llm_tools import LLM_Tools
 from .task_manager import TaskManager
 from backend.core.history_store import history_lock, load_history as load_history_file, save_history_atomic
+from backend.core.memory_store import search_memories
 import asyncio
 
 # All Akira data files live under backend/
@@ -23,6 +24,43 @@ INTERACTION: Be concise; ask pointed questions when unclear; call out problemati
 BOUNDARIES: Deny with attitude; refuse manipulative tactics; don't dumb down.
 SELF-IMPROVEMENT: You have read_file and write_file for code; get_system_prompt and edit_system_prompt for your system prompt in akira_system_prompt.md. Improve yourself when it makes sense.
 Remember: Your value is honesty, directness, and blending technical knowledge with practical wisdom."""
+
+
+def _inject_timestamp_into_content(content, timestamp: str):
+    """Append [Sent at: <timestamp>] to message content so the model sees when each message was sent."""
+    if not timestamp:
+        return content
+    suffix = f"\n[Sent at: {timestamp}]"
+    if isinstance(content, str):
+        return content + suffix
+    if isinstance(content, list):
+        out = []
+        last_text_idx = -1
+        for i, block in enumerate(content):
+            if isinstance(block, dict) and block.get("type") == "text" and "text" in block:
+                last_text_idx = i
+            out.append(dict(block))
+        if last_text_idx >= 0:
+            out[last_text_idx]["text"] = out[last_text_idx]["text"] + suffix
+        else:
+            out.append({"type": "text", "text": f"[Sent at: {timestamp}]"})
+        return out
+    return content
+
+
+def _user_content_to_text(content) -> str:
+    """Extract plain text from user message content for memory search and classification."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text" and "text" in block:
+                parts.append(block["text"])
+        return " ".join(parts)
+    return str(content)
 
 
 def _last_message_is_tool_result(messages: list) -> bool:
@@ -55,7 +93,7 @@ class LLM_Service(LLM_Tools):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.info("Initializing LLM_Service")
         self.history_file_path = HISTORY_FILE
-        self._set_provider(provider_name or "openrouter")
+        self._set_provider(provider_name or "anthropic")
         self.system_prompt = _load_system_prompt_from_file(SYSTEM_PROMPT_FILE) or _DEFAULT_SYSTEM_PROMPT
         self.current_mood = None  # Optional; can be set by frontend (settings.mood) or by a tool
 
@@ -100,6 +138,26 @@ class LLM_Service(LLM_Tools):
                     lines.append(f"- {name}")
             parts.append("\n".join(lines))
         return "".join(parts)
+
+    def _inject_memory_context(self, system_prompt: str, user_text: str, limit: int = 5) -> str:
+        """Prepend relevant long-term memories to the system prompt when AGI mode is on."""
+        if not (user_text or "").strip():
+            return system_prompt
+        try:
+            memories = search_memories(user_text.strip(), limit=limit)
+        except Exception as e:
+            self.logger.debug("Memory search skipped: %s", e)
+            return system_prompt
+        if not memories:
+            return system_prompt
+        lines = ["\n\nRelevant long-term memories (use when helpful):"]
+        for m in memories:
+            content = (m.get("content") or "").strip()
+            if content:
+                lines.append(f"- {content}")
+        if len(lines) <= 1:
+            return system_prompt
+        return system_prompt + "\n" + "\n".join(lines)
 
     def _set_provider(self, provider_name: str) -> BaseLLMProvider:
         """Get the appropriate LLM provider based on name"""
@@ -209,16 +267,27 @@ class LLM_Service(LLM_Tools):
         return content
 
     def _build_messages(self, history, user_message):
-        """Build messages list from history and current user message (for API)."""
+        """Build messages list from history and current user message (for API).
+        Injects [Sent at: <timestamp>] into each message so the model can see elapsed time."""
         history = history or []
-        keys_to_keep = ["role", "content"]
-        messages = [{k: d[k] for k in keys_to_keep if k in d} for d in history]
+        messages = []
+        for d in history:
+            role = d.get("role")
+            content = d.get("content")
+            if role is None or content is None:
+                continue
+            ts = d.get("timestamp")
+            content = _inject_timestamp_into_content(content, ts)
+            messages.append({"role": role, "content": content})
+        current_ts = datetime.now().isoformat()
         if isinstance(user_message, str):
+            text = _inject_timestamp_into_content(user_message, current_ts)
             messages.append(
-                {"role": "user", "content": [{"type": "text", "text": user_message}]}
+                {"role": "user", "content": [{"type": "text", "text": text}]}
             )
         else:
-            messages.append({"role": "user", "content": user_message})
+            content = _inject_timestamp_into_content(user_message, current_ts)
+            messages.append({"role": "user", "content": content})
         return messages
 
     def get_enabled_tools(self, enabled_tools_map=None):
@@ -317,7 +386,7 @@ class LLM_Service(LLM_Tools):
         status, tool_result = self.call_tool(tool_name, tool_input)
 
         if status != 200:
-            error_message = f"Some error occured in tool call, please check and refactor: {json.dumps(tool_result)}"
+            error_message = f"Some error occurred in tool call, please check and refactor: {json.dumps(tool_result)}"
             messages.append(
                 {
                     "role": "user",
@@ -348,6 +417,7 @@ class LLM_Service(LLM_Tools):
         temperature=0.7,
         thinking_enabled=False,
         thinking_budget=1024,
+        tool_timeout_seconds=None,
     ):
         """Non-streaming wrapper for invoke_llm_streaming"""
         full_response = ""
@@ -361,6 +431,7 @@ class LLM_Service(LLM_Tools):
             temperature,
             thinking_enabled,
             thinking_budget,
+            tool_timeout_seconds=tool_timeout_seconds,
         ):
             full_response += chunk
         return full_response
@@ -376,11 +447,78 @@ class LLM_Service(LLM_Tools):
         system_prompt=None,
         enabled_tools_map=None,
         mood=None,
+        model_override=None,
+        tool_timeout_seconds=None,
     ):
         """Streaming version of invoke_llm that yields partial responses and handles multiple tool calls."""
+        prev_timeout = getattr(self, "_request_tool_timeout_seconds", None)
+        self._request_tool_timeout_seconds = tool_timeout_seconds
+        try:
+            yield from self._invoke_llm_streaming_sync_impl(
+                user_message,
+                history,
+                max_tokens,
+                temperature,
+                thinking_enabled,
+                thinking_budget,
+                system_prompt,
+                enabled_tools_map,
+                mood,
+                model_override,
+            )
+        finally:
+            self._request_tool_timeout_seconds = prev_timeout
+
+    def _invoke_llm_streaming_sync_impl(
+        self,
+        user_message,
+        history=None,
+        max_tokens=4000,
+        temperature=0.7,
+        thinking_enabled=False,
+        thinking_budget=1024,
+        system_prompt=None,
+        enabled_tools_map=None,
+        mood=None,
+        model_override=None,
+    ):
+        """Implementation of streaming sync (tool timeout set by caller)."""
         base = system_prompt or self.system_prompt
         active_system_prompt = self._system_prompt_for_request(base, mood, enabled_tools_map)
         messages = self._build_messages(history, user_message)
+
+        # AGI mode: memory injection + task-based model routing (OpenRouter only)
+        agi_mode = os.getenv("AGI_MODE", "").strip().lower() in ("1", "true", "yes")
+        if agi_mode:
+            user_text = _user_content_to_text(
+                user_message if not isinstance(user_message, dict) else user_message.get("content")
+            )
+            if not user_text and history:
+                for m in reversed(history):
+                    if m.get("role") == "user":
+                        user_text = _user_content_to_text(m.get("content"))
+                        break
+            active_system_prompt = self._inject_memory_context(active_system_prompt, user_text)
+            active_system_prompt += (
+                "\n\nAGI mode: When the request is complex or has multiple steps, use the execute_plan tool to break it down and run the steps. "
+                "Use store_memory for important facts you want to remember across conversations."
+            )
+            if model_override is None and isinstance(self.provider, OpenRouterProvider):
+                from backend.agi.task_classifier import classify_task
+                from backend.agi.model_router import get_model_for_task
+                has_images = isinstance(user_message, list) and any(
+                    isinstance(b, dict) and b.get("type") in ("image", "image_url") for b in user_message
+                ) if not isinstance(user_message, str) else False
+                task_type = classify_task(
+                    user_message,
+                    has_images=has_images,
+                    history_messages=history,
+                    use_llm=False,
+                )
+                model_override = get_model_for_task(task_type)
+                if model_override:
+                    self.logger.info("AGI routing: task_type=%s -> model=%s", task_type, model_override)
+
         full_response = ""
         continue_after_tool = True
         use_thinking_this_turn = thinking_enabled
@@ -408,6 +546,7 @@ class LLM_Service(LLM_Tools):
                     system_prompt=active_system_prompt,
                     thinking_enabled=use_thinking_this_turn,
                     thinking_budget=thinking_budget,
+                    model_override=model_override,
                 ):
                     # Handle thinking blocks (sent as collapsible markup for frontend)
                     if (
@@ -638,11 +777,81 @@ class LLM_Service(LLM_Tools):
         enabled_tools_map=None,
         stream_read_timeout=120.0,
         mood=None,
+        model_override=None,
+        tool_timeout_seconds=None,
     ):
         """Async streaming version: yields partial responses and handles multiple tool calls."""
+        prev_timeout = getattr(self, "_request_tool_timeout_seconds", None)
+        self._request_tool_timeout_seconds = tool_timeout_seconds
+        try:
+            async for chunk in self._invoke_llm_streaming_async_impl(
+                user_message,
+                history,
+                max_tokens,
+                temperature,
+                thinking_enabled,
+                thinking_budget,
+                system_prompt,
+                enabled_tools_map,
+                stream_read_timeout,
+                mood,
+                model_override,
+            ):
+                yield chunk
+        finally:
+            self._request_tool_timeout_seconds = prev_timeout
+
+    async def _invoke_llm_streaming_async_impl(
+        self,
+        user_message,
+        history=None,
+        max_tokens=4000,
+        temperature=0.7,
+        thinking_enabled=False,
+        thinking_budget=1024,
+        system_prompt=None,
+        enabled_tools_map=None,
+        stream_read_timeout=120.0,
+        mood=None,
+        model_override=None,
+    ):
+        """Implementation of async streaming (tool timeout set by caller)."""
         base = system_prompt or self.system_prompt
         active_system_prompt = self._system_prompt_for_request(base, mood, enabled_tools_map)
         messages = self._build_messages(history, user_message)
+
+        # AGI mode: memory injection + task-based model routing (OpenRouter only)
+        agi_mode = os.getenv("AGI_MODE", "").strip().lower() in ("1", "true", "yes")
+        if agi_mode:
+            user_text = _user_content_to_text(
+                user_message if not isinstance(user_message, dict) else user_message.get("content")
+            )
+            if not user_text and history:
+                for m in reversed(history):
+                    if m.get("role") == "user":
+                        user_text = _user_content_to_text(m.get("content"))
+                        break
+            active_system_prompt = self._inject_memory_context(active_system_prompt, user_text)
+            active_system_prompt += (
+                "\n\nAGI mode: When the request is complex or has multiple steps, use the execute_plan tool to break it down and run the steps. "
+                "Use store_memory for important facts you want to remember across conversations."
+            )
+            if model_override is None and isinstance(self.provider, OpenRouterProvider):
+                from backend.agi.task_classifier import classify_task
+                from backend.agi.model_router import get_model_for_task
+                has_images = isinstance(user_message, list) and any(
+                    isinstance(b, dict) and b.get("type") in ("image", "image_url") for b in user_message
+                ) if not isinstance(user_message, str) else False
+                task_type = classify_task(
+                    user_message,
+                    has_images=has_images,
+                    history_messages=history,
+                    use_llm=False,
+                )
+                model_override = get_model_for_task(task_type)
+                if model_override:
+                    self.logger.info("AGI routing: task_type=%s -> model=%s", task_type, model_override)
+
         full_response = ""
         continue_after_tool = True
         use_thinking_this_turn = thinking_enabled
@@ -668,6 +877,7 @@ class LLM_Service(LLM_Tools):
                     thinking_enabled=use_thinking_this_turn,
                     thinking_budget=thinking_budget,
                     stream_read_timeout=stream_read_timeout,
+                    model_override=model_override,
                 ):
                     if (
                         chunk.get("type") == "content_block_start"

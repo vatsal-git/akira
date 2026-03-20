@@ -2,6 +2,8 @@ import logging
 from typing import Any
 from fastapi import APIRouter, Request, HTTPException
 
+from backend.core.history_store import history_lock, load_history, save_history_atomic
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -58,14 +60,13 @@ async def get_chat(chat_id: str, request: Request):
 async def delete_chat(chat_id: str, request: Request):
     """Delete a chat from history."""
     llm: Any = request.app.state.llm_service
-    all_history = llm.load_history()
-    if chat_id not in all_history:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    del all_history[chat_id]
-
-    import json
-    with open(llm.history_file_path, "w", encoding="utf-8") as f:
-        json.dump(all_history, f, indent=2, ensure_ascii=False)
+    path = llm.history_file_path
+    with history_lock(path):
+        all_history = load_history(path)
+        if chat_id not in all_history:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        del all_history[chat_id]
+        save_history_atomic(path, all_history)
     return {"ok": True}
 
 

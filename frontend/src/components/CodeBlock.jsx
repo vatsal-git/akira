@@ -45,15 +45,40 @@ const CheckIcon = () => (
 
 /**
  * Code block with:
- * - Text wrap on by default (toggle in top-right)
+ * - Text wrap on by default (toggle in top-right when it matters)
  * - Fixed height with scroll by default; expand button to show full block
  */
 export function CodeBlock({ children, raw, languageClassName = '', className = '' }) {
   const content = raw !== undefined ? raw : (typeof children === 'string' ? children : (children ?? ''));
   const [wrap, setWrap] = React.useState(true);
   const [expanded, setExpanded] = React.useState(false);
+  const [needsExpand, setNeedsExpand] = React.useState(false);
+  const [needsHorizontalOverflow, setNeedsHorizontalOverflow] = React.useState(false);
   const [copied, setCopied] = React.useState(false);
   const copyTimeoutRef = React.useRef(null);
+  const contentRef = React.useRef(null);
+
+  const measureLayout = React.useCallback(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    setNeedsHorizontalOverflow(el.scrollWidth > el.clientWidth + 1);
+    if (!expanded) {
+      // Tolerate subpixel rounding so we don’t flash a useless control at the exact limit
+      setNeedsExpand(el.scrollHeight > el.clientHeight + 1);
+    }
+  }, [expanded]);
+
+  React.useLayoutEffect(() => {
+    measureLayout();
+  }, [measureLayout, content, wrap]);
+
+  React.useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => measureLayout());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [measureLayout]);
 
   const handleCopy = React.useCallback(() => {
     const text = typeof content === 'string' ? content : String(content ?? '');
@@ -85,26 +110,30 @@ export function CodeBlock({ children, raw, languageClassName = '', className = '
         >
           {copied ? <CheckIcon /> : <CopyIcon />}
         </button>
-        <button
-          type="button"
-          className="code-block__btn"
-          onClick={() => setWrap((w) => !w)}
-          aria-label={wrap ? 'Disable wrap' : 'Wrap text'}
-          title={wrap ? 'Disable wrap' : 'Wrap text'}
-        >
-          {wrap ? <WrapIcon /> : <NoWrapIcon />}
-        </button>
-        <button
-          type="button"
-          className="code-block__btn"
-          onClick={() => setExpanded((e) => !e)}
-          aria-label={expanded ? 'Collapse' : 'Expand'}
-          title={expanded ? 'Collapse' : 'Expand'}
-        >
-          {expanded ? <CollapseIcon /> : <ExpandIcon />}
-        </button>
+        {(!wrap || needsHorizontalOverflow) && (
+          <button
+            type="button"
+            className="code-block__btn"
+            onClick={() => setWrap((w) => !w)}
+            aria-label={wrap ? 'Disable wrap' : 'Wrap text'}
+            title={wrap ? 'Disable wrap' : 'Wrap text'}
+          >
+            {wrap ? <WrapIcon /> : <NoWrapIcon />}
+          </button>
+        )}
+        {(expanded || needsExpand) && (
+          <button
+            type="button"
+            className="code-block__btn"
+            onClick={() => setExpanded((e) => !e)}
+            aria-label={expanded ? 'Collapse' : 'Expand'}
+            title={expanded ? 'Collapse' : 'Expand'}
+          >
+            {expanded ? <CollapseIcon /> : <ExpandIcon />}
+          </button>
+        )}
       </div>
-      <div className="code-block__content">
+      <div ref={contentRef} className="code-block__content">
         <pre className="code-block__pre">
           <code className={languageClassName || ''}>{content}</code>
         </pre>

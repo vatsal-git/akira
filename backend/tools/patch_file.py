@@ -6,14 +6,13 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+from backend.core.file_access import atomic_write_text, is_write_allowed, resolve_path
 
-_BACKEND_DIR = Path(__file__).resolve().parent.parent
-WORKSPACE_ROOT = _BACKEND_DIR.parent
+logger = logging.getLogger(__name__)
 
 TOOL_DEF = {
     "name": "patch_file",
-    "description": "Replace a range of lines in a text file without rewriting the whole file. Use read_file with start_line/end_line and include_line_numbers to see the exact lines, then call patch_file with the same range and your new_content. Only lines start_line through end_line are replaced; the rest of the file is unchanged. Prefer this over write_file when editing part of a file.",
+    "description": "Replace a range of lines in a text file without rewriting the whole file. Use read_file with start_line/end_line and include_line_numbers to see the exact lines, then call patch_file with the same range and your new_content. Only lines start_line through end_line are replaced; the rest of the file is unchanged. Write is atomic. Prefer this over write_file when editing part of a file.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -44,19 +43,6 @@ TOOL_DEF = {
 }
 
 
-def _resolve_path(file_path: str) -> Optional[Path]:
-    path = Path(file_path)
-    if not path.is_absolute():
-        path = (WORKSPACE_ROOT / path).resolve()
-    else:
-        path = path.resolve()
-    try:
-        path.resolve().relative_to(WORKSPACE_ROOT)
-    except ValueError:
-        return None
-    return path
-
-
 def call_tool(tool_input: dict, context=None):
     file_path = tool_input.get("file_path", "").strip()
     start_line = tool_input.get("start_line")
@@ -78,7 +64,7 @@ def call_tool(tool_input: dict, context=None):
             "path": file_path,
         }
 
-    resolved = _resolve_path(file_path)
+    resolved = resolve_path(file_path)
     if resolved is None:
         logger.warning("Rejected path outside workspace: %s", file_path)
         return 200, {
@@ -86,6 +72,11 @@ def call_tool(tool_input: dict, context=None):
             "error": "Path is outside the project workspace.",
             "path": file_path,
         }
+
+    allowed, err = is_write_allowed(resolved)
+    if not allowed:
+        logger.warning("Patch blocked for %s: %s", file_path, err)
+        return 200, {"success": False, "error": err, "path": str(resolved)}
 
     path_str = str(resolved)
     if not resolved.exists():
@@ -118,14 +109,13 @@ def call_tool(tool_input: dict, context=None):
     # Replace lines [s-1:e] with new_content (0-based slice)
     before = lines[: s - 1]
     after = lines[e:]
-    # Ensure new_content ends with a newline if the original range did and we're not at EOF
     replacement = new_content
     if replacement and not replacement.endswith("\n") and after:
         replacement = replacement + "\n"
     new_text = "".join(before) + replacement + "".join(after)
 
     try:
-        resolved.write_text(new_text, encoding=encoding)
+        atomic_write_text(resolved, new_text, encoding=encoding)
     except OSError as err:
         logger.error("Error writing file %s: %s", path_str, err, exc_info=True)
         return 200, {"success": False, "error": str(err), "path": path_str}
