@@ -204,17 +204,17 @@ CLAUDE_INFERENCE_PROFILE=anthropic.claude-3-5-sonnet-...
 
 ### 2. Backend
 
-Default HTTP port is **8002** (override with `PORT` in `.env`).
+Default HTTP port is **8000** (override with `PORT` in `.env`).
 
 ```bash
 pip install -r backend/requirements.txt
 # Also install FastAPI stack if needed, e.g.:
 # pip install fastapi uvicorn python-dotenv pydantic
 cd <project-root>
-python -m uvicorn backend.main:app --host 0.0.0.0 --port 8002
+python -m uvicorn backend.server:app --host 0.0.0.0 --port 8000
 ```
 
-Ensure `frontend/vite.config.js` **`server.proxy['/api'].target`** matches your backend port (it is set to `http://localhost:8002` in the repo).
+Ensure `frontend/vite.config.js` **`server.proxy['/api'].target`** matches your backend port (it is set to `http://localhost:8000` in the repo).
 
 **Telegram bot (optional):** With the API already running, set `TELEGRAM_BOT_TOKEN` in `.env`, optionally `TELEGRAM_ALLOWED_USER_IDS` (comma-separated numeric user IDs — strongly recommended), then from the project root:
 
@@ -250,7 +250,7 @@ npm run dev
 
 | Variable | Description | Example |
 |----------|-------------|--------|
-| `PORT` | Backend listen port | `8002` |
+| `PORT` | Backend listen port | `8000` |
 | `DEFAULT_MODEL` | Default LLM provider | `openrouter`, `anthropic` |
 | `OPENROUTER_API_KEY` | OpenRouter API key | `sk-or-...` |
 | `OPENROUTER_MODEL` | OpenRouter model id | `anthropic/claude-sonnet-4` |
@@ -262,9 +262,9 @@ npm run dev
 
 **Frontend:** `VITE_API_URL` — API base when not using the dev proxy. `VITE_BASE_PATH` — e.g. `./` for Electron file URLs.
 
-**Desktop:** `AKIRA_API_URL` — Backend URL (often `http://localhost:8002`).
+**Desktop:** `AKIRA_API_URL` — Backend URL (often `http://localhost:8000`).
 
-**Telegram bridge:** `TELEGRAM_BOT_TOKEN` (required to run the bot), `TELEGRAM_ALLOWED_USER_IDS` (optional allowlist), `AKIRA_API_BASE` (default `http://127.0.0.1:8002`), `TELEGRAM_ENABLE_TOOLS` (set to `1` to allow tools; default is off). On locked-down networks, `SSL: CERTIFICATE_VERIFY_FAILED` to Telegram is usually corporate TLS inspection: set `TELEGRAM_SSL_CA_BUNDLE` to a PEM file with your org CA, or as a last resort `TELEGRAM_VERIFY_SSL=0` (insecure). `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` are used the same way if they point to a real file.
+**Telegram bridge:** `TELEGRAM_BOT_TOKEN` (required to run the bot), `TELEGRAM_ALLOWED_USER_IDS` (optional allowlist), `AKIRA_API_BASE` (default `http://127.0.0.1:8000`), `TELEGRAM_ENABLE_TOOLS` (set to `1` to allow tools; default is off). On locked-down networks, `SSL: CERTIFICATE_VERIFY_FAILED` to Telegram is usually corporate TLS inspection: set `TELEGRAM_SSL_CA_BUNDLE` to a PEM file with your org CA, or as a last resort `TELEGRAM_VERIFY_SSL=0` (insecure). `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` are used the same way if they point to a real file.
 
 ---
 

@@ -959,11 +959,10 @@ class LLM_Service(LLM_Tools):
                             # Consecutive tool error: last message was already a tool result; don't loop
                             if status != 200 and _last_message_is_tool_result(messages):
                                 err_content = (
-                                    "The tool call failed again. Do not call the same tool again. "
-                                    "Tell the user what went wrong and suggest a valid option."
+                                    "The tool call failed again. Try understanding the error message and make a call differently on next iteration. If not fixed, either inform the user or plan to update the code. "
                                 )
                                 messages.append({"role": "user", "content": err_content})
-                                yield "\n\n" + err_content
+                                yield "\n\n" + err_content + "\n\n"
                                 full_response += "\n\n" + err_content
                                 continue_after_tool = True
                                 use_thinking_this_turn = thinking_enabled and bool(
@@ -1292,12 +1291,11 @@ class LLM_Service(LLM_Tools):
                             # Consecutive tool error: last message was already a tool result; don't loop
                             if status != 200 and _last_message_is_tool_result(messages):
                                 err_content = (
-                                    "The tool call failed again. Do not call the same tool again. "
-                                    "Tell the user what went wrong and suggest a valid option."
+                                    "The tool call failed again. Try understanding the error message and make a call differently on next iteration. If not fixed, either inform the user or plan to update the code. "
                                 )
                                 messages.append({"role": "user", "content": err_content})
                                 yield "\n\n" + err_content
-                                full_response += "\n\n" + err_content
+                                full_response += "\n\n" + err_content + "\n\n"
                                 continue_after_tool = True
                                 use_thinking_this_turn = thinking_enabled and bool(
                                     thinking_content and thinking_signature

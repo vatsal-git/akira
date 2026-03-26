@@ -139,5 +139,5 @@ if os.path.isdir(FRONTEND_BUILD):
 if __name__ == "__main__":
     import uvicorn
     os.chdir(PROJECT_ROOT)
-    port = int(os.getenv("PORT", "8002"))
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=port, reload=True)
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("backend.server:app", host="0.0.0.0", port=port, reload=True)

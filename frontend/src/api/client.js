@@ -1,8 +1,8 @@
 /**
  * API base URL when running in Electron (set by preload) or from env. Empty = same origin / Vite proxy.
- * When the app is served from the backend (e.g. desktop at 127.0.0.1:8002), use same origin to avoid CORS.
+ * When the app is served from the backend (e.g. desktop at 127.0.0.1:8000), use same origin to avoid CORS.
  */
-const DEFAULT_API_PORT = '8002';
+const DEFAULT_API_PORT = '8000';
 export function getApiBase() {
   if (typeof window !== 'undefined' && window.__AKIRA_API__) return window.__AKIRA_API__;
   const fromEnv = import.meta.env?.VITE_API_URL;

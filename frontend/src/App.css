@@ -2246,7 +2246,7 @@ html.akira-desktop-overlay[data-appearance='dark'] .sidebar {
   --tube-face-mid: #ffd6dc;
   --tube-face-soft: #ffc8d0;
   --tube-g1: rgba(220, 36, 56, 0.95);
-  --tube-g2: rgba(220, 36, 56, 0.68);
+  --tube-g2: #dc2438ad;
   --tube-g3: rgba(220, 36, 56, 0.4);
   --tube-g4: rgba(255, 210, 215, 0.95);
   --tube-g5: rgba(255, 90, 105, 0.5);

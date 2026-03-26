@@ -1,7 +1,7 @@
 """
 Akira ↔ Telegram bridge (long polling).
 
-Loads environment from the repo root ``.env`` (same as ``backend.main``).
+Loads environment from the repo root ``.env`` (same as ``backend.server``).
 
 Required:
   TELEGRAM_BOT_TOKEN — from @BotFather
@@ -11,7 +11,7 @@ Recommended:
   If unset, any user who finds the bot can use it (fine for private testing only).
 
 Optional:
-  AKIRA_API_BASE — default ``http://127.0.0.1:8002`` (no trailing slash)
+  AKIRA_API_BASE — default ``http://127.0.0.1:8000`` (no trailing slash)
   TELEGRAM_ENABLE_TOOLS — set to ``1`` / ``true`` / ``yes`` to allow all Akira tools
     over Telegram (dangerous if the API runs on your machine). Default: tools off.
 
@@ -130,7 +130,7 @@ def _parse_allowed_ids(raw: Optional[str]) -> Optional[Set[int]]:
 
 
 def _api_base() -> str:
-    base = (os.getenv("AKIRA_API_BASE") or "http://127.0.0.1:8002").rstrip("/")
+    base = (os.getenv("AKIRA_API_BASE") or "http://127.0.0.1:8000").rstrip("/")
     return base
 
 
